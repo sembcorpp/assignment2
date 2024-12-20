@@ -166,9 +166,12 @@ void
 log_bytes(const void *data, size_t length)
 {
   const uint8_t *u8data = (const uint8_t *)data;
-  size_t i;
-  for(i = 0; i != length; ++i) {
-    LOG_OUTPUT("%02x", u8data[i]);
+  for(size_t i = 0; i < length; ++i) {
+    if(LOG_WITH_COMPACT_BYTES) {
+      LOG_OUTPUT("%02x", u8data[i]);
+    } else {
+      LOG_OUTPUT(i == 0 ? "%02x" : " %02x", u8data[i]);
+    }
   }
 }
 /*---------------------------------------------------------------------------*/
