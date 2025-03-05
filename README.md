@@ -11,7 +11,7 @@
 ## Instructions for executing our program 
 1. Create a new directory inside  `contiki-ng/examples`
 2. Copy all provided files (Makefile, task2.c, task3.c) into the directory
-3. Compile using Makefile.
+3. Compile using Makefile
 
 ## Names and student IDs:
 Tan Wei Xuan Rachel, A0240685B
