@@ -33,7 +33,7 @@ static int switch_change = 1;
 static int prev_lux_reading = 0;
 static void init_opt_reading(void);
 static void check_change_in_light_reading(void);
-
+static void update_lux(void);
 static void init_mpu_reading(void);
 static void check_change_in_mpu_reading(void);
 
@@ -70,6 +70,7 @@ do_rtimer_timeout(struct rtimer *timer, void *ptr)
     else if (curr_state == _WAIT)
     {
       buzzer_stop();
+      update_lux();
       rtimer_set(&timer_rtimer, RTIMER_NOW() + cycle_rtimer, 0, do_rtimer_timeout, NULL);
       curr_state = _BUZZ;
       buzzstate_countdown--;
@@ -114,6 +115,19 @@ static void
 init_opt_reading(void)
 {
   SENSORS_ACTIVATE(opt_3001_sensor);
+}
+
+static void
+update_lux(void) 
+{
+  int value;
+  value = opt_3001_sensor.value(0);
+  if(value != CC26XX_SENSOR_READING_ERROR) {
+    printf("OPT: Light=%d.%02d lux\n", value / 100, value % 100);
+    prev_lux_reading = value;
+  }
+
+  init_opt_reading();
 }
 
 //Motion Sensor
