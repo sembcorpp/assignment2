@@ -15,5 +15,6 @@
 
 ## Names and student IDs:
 Tan Wei Xuan Rachel, A0240685B
-
-#TODO add you own name and id
+Jane Tan Hua Hui , A0237909R
+Lim Jian Rong, Nicholas , A0238329X
+Shane Patrick Duggan, A0235263J
