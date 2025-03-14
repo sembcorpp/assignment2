@@ -13,6 +13,9 @@
 2. Copy all provided files (Makefile, task2.c, task3.c) into the directory
 3. Compile using Makefile
 
+Ensure the Makefile includes:
+CONTIKI_PROJECT = etimer-buzzer rtimer-lightSensor rtimer-IMUSensor task2 task3
+
 ## Names and student IDs:
 Tan Wei Xuan Rachel, A0240685B
 Jane Tan Hua Hui , A0237909R
