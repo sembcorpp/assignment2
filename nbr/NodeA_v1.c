@@ -1,5 +1,5 @@
 // ===============================
-// NodeA - Sensing and Transmitting Node
+// NodeA - Sensing and Receiving Node
 // ===============================
 
 #include "contiki.h"
@@ -12,12 +12,6 @@
 #include <string.h>
 #include <stdio.h> 
 #include "node-id.h"
-
-// Parameters for neighbor discovery 
-#define WAKE_TIME RTIMER_SECOND/10    // 100ms wake time
-#define SLEEP_CYCLE 9
-#define SLEEP_SLOT RTIMER_SECOND/10   // 100ms sleep slot
-#define NUM_SEND 2                    // Send 2 packets per wake
 
 // Link quality threshold
 #define RSSI_THRESHOLD -70
@@ -48,13 +42,6 @@ typedef struct {
   int16_t motion_readings[10]; // Send 10 readings at a time
 } data_packet_struct;
 
-// Variables for beacon transmission
-static struct rtimer rt;
-static struct pt pt;
-static beacon_packet_struct beacon_packet;
-static unsigned long curr_timestamp;
-static unsigned long beacon_seq = 0;
-
 // Variables for data collection
 static int16_t light_readings[MAX_READINGS];
 static int16_t motion_readings[MAX_READINGS];
@@ -64,17 +51,16 @@ static uint8_t is_collecting = 0;
 static struct etimer sensing_timer;
 
 // Variables for node discovery
-static linkaddr_t dest_addr;
 static linkaddr_t last_neighbor;
 static int8_t last_rssi = -128;
 static uint8_t neighbor_found = 0;
 static uint8_t data_transfer_active = 0;
+static unsigned long curr_timestamp;
 
 // Processes
-PROCESS(neighbor_discovery_process, "Node A - Neighbor Discovery");
 PROCESS(sensing_process, "Node A - Sensing Process");
 PROCESS(data_transfer_process, "Node A - Data Transfer Process");
-AUTOSTART_PROCESSES(&neighbor_discovery_process, &sensing_process);
+AUTOSTART_PROCESSES(&sensing_process);
 
 // Initialize sensors
 static void init_sensors(void) {
@@ -133,83 +119,16 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
         data_transfer_active = 1;
         process_start(&data_transfer_process, NULL);
       } else {
-        printf("Link quality not good enough (RSSI = %d)\n", rssi);
+        if (rssi < RSSI_THRESHOLD) {
+          printf("Link quality not good enough (RSSI = %d)\n", rssi);
+        } else if (reading_count == 0) {
+          printf("No readings to transfer yet\n");
+        } else if (data_transfer_active) {
+          printf("Data transfer already in progress\n");
+        }
       }
     }
   }
-}
-
-// Neighbor discovery beacon sending function
-char sender_scheduler(struct rtimer *t, void *ptr) {
-  static uint16_t i = 0;
-  static int NumSleep = 0;
-  
-  PT_BEGIN(&pt);
-  
-  while(1) {
-    // Radio on
-    NETSTACK_RADIO.on();
-    
-    // Send NUM_SEND number of neighbor discovery beacon packets
-    for (i = 0; i < NUM_SEND; i++) {
-      // Initialize the nullnet module with information of packet to be transmitted
-      nullnet_buf = (uint8_t *)&beacon_packet;
-      nullnet_len = sizeof(beacon_packet);
-      
-      beacon_packet.seq++;
-      beacon_packet.timestamp = clock_time();
-      
-      printf("Node A sent beacon seq %lu at time %lu\n", beacon_packet.seq, clock_time() / CLOCK_SECOND);
-      NETSTACK_NETWORK.output(&dest_addr);
-      
-      // Wait for WAKE_TIME before sending the next packet
-      if (i != NUM_SEND - 1) {
-        rtimer_set(t, RTIMER_TIME(t) + WAKE_TIME, 1, (rtimer_callback_t)sender_scheduler, ptr);
-        PT_YIELD(&pt);
-      }
-    }
-    
-    // Sleep for a random number of slots
-    if (SLEEP_CYCLE != 0) {
-      printf("Radio OFF\n");
-      NETSTACK_RADIO.off();
-      
-      // Get a value that is uniformly distributed between 0 and 2*SLEEP_CYCLE
-      // The average is SLEEP_CYCLE
-      NumSleep = random_rand() % (2 * SLEEP_CYCLE + 1);
-      printf("Sleep for %d slots\n", NumSleep);
-      
-      for (i = 0; i < NumSleep; i++) {
-        rtimer_set(t, RTIMER_TIME(t) + SLEEP_SLOT, 1, (rtimer_callback_t)sender_scheduler, ptr);
-        PT_YIELD(&pt);
-      }
-    }
-  }
-  
-  PT_END(&pt);
-}
-
-// Neighbor discovery process
-PROCESS_THREAD(neighbor_discovery_process, ev, data) {
-  PROCESS_BEGIN();
-  
-  // Initialize beacon packet
-  beacon_packet.packet_type = PACKET_TYPE_BEACON;
-  beacon_packet.src_id = node_id;
-  beacon_packet.seq = 0;
-  
-  // Set broadcast address
-  linkaddr_copy(&dest_addr, &linkaddr_null);
-  
-  // Set up the reception callback
-  nullnet_set_input_callback(receive_packet_callback);
-  
-  printf("Node A starting neighbor discovery, NodeID: %u\n", node_id);
-  
-  // Start sender in one millisecond
-  rtimer_set(&rt, RTIMER_NOW() + (RTIMER_SECOND / 1000), 1, (rtimer_callback_t)sender_scheduler, NULL);
-  
-  PROCESS_END();
 }
 
 // Sensing process
@@ -219,7 +138,14 @@ PROCESS_THREAD(sensing_process, ev, data) {
   // Initialize sensors
   init_sensors();
   
+  // Set up the reception callback for beacons
+  nullnet_set_input_callback(receive_packet_callback);
+  
   printf("Node A starting sensing process\n");
+  printf("Listening for beacons from Node B...\n");
+  
+  // Turn radio on to listen for beacons
+  NETSTACK_RADIO.on();
   
   // Continuously collect sensor data
   while (1) {
