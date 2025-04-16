@@ -90,31 +90,8 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
     curr_timestamp = clock_time();
     signed short rssi = packetbuf_attr(PACKETBUF_ATTR_RSSI);
     
-    // Handle beacon packet
-    if (packet_type == PACKET_TYPE_BEACON && len == sizeof(beacon_packet_struct)) {
-      beacon_packet_struct *received_packet = (beacon_packet_struct *)data;
-      unsigned long sender_id = received_packet->src_id;
-      
-      // Log detection
-      printf("%lu DETECT %lu\n", curr_timestamp / CLOCK_SECOND, sender_id);
-      
-      // Find or add neighbor
-      int neighbor_idx = find_neighbor(sender_id);
-      if (neighbor_idx == -1 && num_neighbors < 10) {
-        neighbor_idx = num_neighbors++;
-        neighbors[neighbor_idx].node_id = sender_id;
-        linkaddr_copy(&neighbors[neighbor_idx].addr, src);
-        neighbors[neighbor_idx].discovered = 1;
-      }
-      
-      if (neighbor_idx != -1) {
-        // Update neighbor information
-        neighbors[neighbor_idx].rssi = rssi;
-        neighbors[neighbor_idx].last_heard = curr_timestamp;
-      }
-    }
     // Handle data packet
-    else if (packet_type == PACKET_TYPE_DATA && len == sizeof(data_packet_struct)) {
+    if (packet_type == PACKET_TYPE_DATA && len == sizeof(data_packet_struct)) {
       data_packet_struct *data_packet = (data_packet_struct *)data;
       
       // Store the sender information
@@ -160,6 +137,9 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
           }
         }
         printf("\n");
+        
+        // Reset for next round
+        received_readings_count = 0;
       }
     }
   }
