@@ -21,6 +21,7 @@
 // Packet types
 #define PACKET_TYPE_BEACON 1
 #define PACKET_TYPE_DATA 2
+#define PACKET_TYPE_ACK 3  // New packet type for acknowledgments
 
 // Maximum readings to store (60 readings for 60 seconds)
 #define MAX_READINGS 60
@@ -43,6 +44,13 @@ typedef struct {
   int16_t motion_readings[10]; // Receive 10 readings at a time
 } data_packet_struct;
 
+// Acknowledgment packet structure
+typedef struct {
+  uint8_t packet_type;
+  unsigned long src_id;
+  unsigned long received_count;  // Number of readings received so far
+} ack_packet_struct;
+
 // For neighbor discovery
 static linkaddr_t dest_addr;               // Broadcast address
 static struct rtimer rt;
@@ -54,32 +62,13 @@ static unsigned long curr_timestamp;
 static int16_t received_light_readings[MAX_READINGS];
 static int16_t received_motion_readings[MAX_READINGS];
 static unsigned int received_readings_count = 0;
-static linkaddr_t last_sender;
-static unsigned long last_sender_id = 0;
-
-// Neighbor tracking
-static struct {
-  linkaddr_t addr;
-  unsigned long node_id;
-  int8_t rssi;
-  unsigned long last_heard;
-  uint8_t discovered;
-} neighbors[10];
-static uint8_t num_neighbors = 0;
+static uint8_t data_reception_active = 0;
+static linkaddr_t data_sender_addr;  // Address of the node sending data
+static struct etimer ack_timer;      // Timer for sending acknowledgments
+static unsigned long last_packet_time = 0;  // Time of last packet reception
 
 PROCESS(nbr_discovery_process, "Node B - Broadcaster and Receiver");
 AUTOSTART_PROCESSES(&nbr_discovery_process);
-
-// Find neighbor index by node ID
-static int find_neighbor(unsigned long node_id) {
-  int i;
-  for (i = 0; i < num_neighbors; i++) {
-    if (neighbors[i].node_id == node_id) {
-      return i;
-    }
-  }
-  return -1;
-}
 
 // Function called after reception of a packet
 void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *src, const linkaddr_t *dest) {
@@ -96,22 +85,6 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
       
       // Log detection in required format
       printf("%lu DETECT %lu\n", curr_timestamp / CLOCK_SECOND, beacon->src_id);
-      
-      // Store/update neighbor information
-      int idx = find_neighbor(beacon->src_id);
-      if (idx == -1 && num_neighbors < 10) {
-        // New neighbor
-        idx = num_neighbors++;
-        linkaddr_copy(&neighbors[idx].addr, src);
-        neighbors[idx].node_id = beacon->src_id;
-        neighbors[idx].discovered = 1;
-      }
-      
-      if (idx != -1) {
-        // Update neighbor information
-        neighbors[idx].rssi = rssi;
-        neighbors[idx].last_heard = curr_timestamp;
-      }
     }
     
     // Handle data packet
@@ -120,10 +93,11 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
       
       // Keep radio on while receiving data
       NETSTACK_RADIO.on();
+      data_reception_active = 1;
+      last_packet_time = curr_timestamp;
       
-      // Store the sender information
-      last_sender_id = data_packet->src_id;
-      linkaddr_copy(&last_sender, src);
+      // Store sender address for acknowledgments
+      linkaddr_copy(&data_sender_addr, src);
       
       // Process and store the readings
       unsigned int i;
@@ -144,6 +118,22 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
       
       printf("Received data packet from %lu with %lu readings starting at index %lu (RSSI: %d)\n",
              data_packet->src_id, data_packet->num_readings, data_packet->start_idx, rssi);
+             
+      // Send acknowledgment packet
+      static ack_packet_struct ack_packet;
+      ack_packet.packet_type = PACKET_TYPE_ACK;
+      ack_packet.src_id = node_id;
+      ack_packet.received_count = received_readings_count;
+      
+      nullnet_buf = (uint8_t *)&ack_packet;
+      nullnet_len = sizeof(ack_packet);
+      NETSTACK_NETWORK.output(&data_sender_addr);
+      
+      printf("Sent ACK to %u, received %u/60 readings\n", 
+             data_packet->src_id, received_readings_count);
+      
+      // Set timer to periodically send acknowledgments if no new data received
+      etimer_set(&ack_timer, CLOCK_SECOND);
       
       // If we've received a complete set, display them
       if (received_readings_count == MAX_READINGS) {
@@ -165,8 +155,12 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
         }
         printf("\n");
         
+        printf("Successfully received all %u readings!\n", MAX_READINGS);
+        
         // Reset for next round
         received_readings_count = 0;
+        data_reception_active = 0;
+        etimer_stop(&ack_timer);
       }
     }
   }
@@ -179,6 +173,14 @@ char sender_scheduler(struct rtimer *t, void *ptr) {
   PT_BEGIN(&pt);
 
   while(1) {
+    // If we're actively receiving data, don't send beacons
+    if (data_reception_active) {
+      // Just yield and check again after a short time
+      rtimer_set(t, RTIMER_TIME(t) + WAKE_TIME, 1, (rtimer_callback_t)sender_scheduler, ptr);
+      PT_YIELD(&pt);
+      continue;
+    }
+    
     printf("Radio ON: sending beacons and listening...\n");
     NETSTACK_RADIO.on();
 
@@ -206,7 +208,7 @@ char sender_scheduler(struct rtimer *t, void *ptr) {
     PT_YIELD(&pt);
 
     // sleep for a random number of slots
-    if(SLEEP_CYCLE != 0){
+    if(SLEEP_CYCLE != 0 && !data_reception_active){
       printf("Radio OFF\n");
       NETSTACK_RADIO.off();
 
@@ -216,6 +218,11 @@ char sender_scheduler(struct rtimer *t, void *ptr) {
       printf("Sleep for %d slots\n", NumSleep);
 
       for(i = 0; i < NumSleep; i++) {
+        // If data reception becomes active, break out of sleep
+        if (data_reception_active) {
+          NETSTACK_RADIO.on();
+          break;
+        }
         rtimer_set(t, RTIMER_TIME(t) + SLEEP_SLOT, 1, (rtimer_callback_t)sender_scheduler, ptr);
         PT_YIELD(&pt);
       }
@@ -244,9 +251,51 @@ PROCESS_THREAD(nbr_discovery_process, ev, data) {
   // Start sender in one millisecond
   rtimer_set(&rt, RTIMER_NOW() + (RTIMER_SECOND / 1000), 1, (rtimer_callback_t)sender_scheduler, NULL);
 
-  // Keep the process alive
+  // Keep the process alive and handle periodic tasks
   while(1) {
     PROCESS_YIELD();
+    
+    // If data reception is active and timer expires, send another ACK
+    if (ev == PROCESS_EVENT_TIMER && etimer_expired(&ack_timer) && data_reception_active) {
+      // If no packet received for 3 seconds, assume transfer is complete
+      if (clock_time() > last_packet_time + (3 * CLOCK_SECOND)) {
+        // If we received some data but not all 60 readings
+        if (received_readings_count > 0 && received_readings_count < MAX_READINGS) {
+          printf("Data transfer appears to be interrupted. Received %u/60 readings.\n", 
+                 received_readings_count);
+          
+          // Send final ACK to confirm what we received
+          static ack_packet_struct ack_packet;
+          ack_packet.packet_type = PACKET_TYPE_ACK;
+          ack_packet.src_id = node_id;
+          ack_packet.received_count = received_readings_count;
+          
+          nullnet_buf = (uint8_t *)&ack_packet;
+          nullnet_len = sizeof(ack_packet);
+          NETSTACK_NETWORK.output(&data_sender_addr);
+          
+          printf("Sent final ACK, received %u/60 readings\n", received_readings_count);
+        }
+        
+        // Reset state for next transfer
+        data_reception_active = 0;
+      } else {
+        // Periodically send ACK to confirm current progress
+        static ack_packet_struct ack_packet;
+        ack_packet.packet_type = PACKET_TYPE_ACK;
+        ack_packet.src_id = node_id;
+        ack_packet.received_count = received_readings_count;
+        
+        nullnet_buf = (uint8_t *)&ack_packet;
+        nullnet_len = sizeof(ack_packet);
+        NETSTACK_NETWORK.output(&data_sender_addr);
+        
+        printf("Sent periodic ACK, received %u/60 readings\n", received_readings_count);
+        
+        // Reset timer for next ACK
+        etimer_reset(&ack_timer);
+      }
+    }
   }
 
   PROCESS_END();
