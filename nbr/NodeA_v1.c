@@ -313,29 +313,14 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
   data_packet.packet_type = PACKET_TYPE_DATA;
   data_packet.src_id = node_id;
   
-  // Reset retry counter
-  retry_count = 0;
-  
-  // Use last_ack_count to determine where to start sending
-  if (last_ack_count > 0 && last_ack_count <= reading_count) {
-    // Resume from where the receiver left off
-    last_sent_idx = last_ack_count;
-    printf("Resuming transfer from index %u\n", last_sent_idx);
-  }
-  
   // Calculate number of packets needed
   total_packets = (reading_count - last_sent_idx + READINGS_PER_PACKET - 1) / READINGS_PER_PACKET;
   
   printf("Starting data transfer: %u readings to send (from index %u to %u)\n", 
          reading_count - last_sent_idx, last_sent_idx, reading_count - 1);
   
+  // Send all packets without waiting for intermediate ACKs
   for (packet_count = 0; packet_count < total_packets; packet_count++) {
-    // If we've received an ACK with all readings, we're done
-    if (last_ack_count >= reading_count) {
-      printf("All readings confirmed received, transfer complete\n");
-      break;
-    }
-    
     // Calculate readings for this packet
     unsigned int remaining = reading_count - last_sent_idx;
     packet_size = (remaining < READINGS_PER_PACKET) ? remaining : READINGS_PER_PACKET;
@@ -351,61 +336,38 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
       data_packet.motion_readings[i] = motion_readings[last_sent_idx + i];
     }
     
-    // Reset retry count for this packet
-    retry_count = 0;
+    // Send packet
+    nullnet_buf = (uint8_t *)&data_packet;
+    nullnet_len = sizeof(data_packet);
     
-    // Send packet (with retries if needed)
-    while (retry_count < MAX_RETRIES) {
-      // Send packet
-      nullnet_buf = (uint8_t *)&data_packet;
-      nullnet_len = sizeof(data_packet);
-      
-      printf("Sending packet %u/%u with %u readings starting at index %u (try %u)\n", 
-             packet_count + 1, total_packets, data_packet.num_readings, 
-             data_packet.start_idx, retry_count + 1);
-      
-      NETSTACK_NETWORK.output(&last_neighbor);
-      
-      // Wait for acknowledgment
-      etimer_set(&ack_timer, ACK_TIMEOUT);
-      PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_CONTINUE || 
-                              (ev == PROCESS_EVENT_TIMER && etimer_expired(&ack_timer)));
-      
-      // If we got an ACK with a count that covers our sent data, proceed to next packet
-      if (last_ack_count > last_sent_idx) {
-        printf("Packet confirmed - last_ack_count: %u\n", last_ack_count);
-        break;
-      }
-      
-      // No ACK received or not all readings confirmed
-      retry_count++;
-      if (retry_count >= MAX_RETRIES) {
-        printf("Maximum retries reached for packet %u, continuing anyway\n", packet_count + 1);
-      } else {
-        printf("Retrying packet %u (attempt %u/%u)\n", 
-               packet_count + 1, retry_count + 1, MAX_RETRIES);
-      }
-    }
+    printf("Sending packet %u/%u with %u readings starting at index %u\n", 
+           packet_count + 1, total_packets, data_packet.num_readings, data_packet.start_idx);
     
-    // Update last sent index based on ACK
-    if (last_ack_count > last_sent_idx) {
-      // Update based on ACK (might have jumped ahead if NodeB received multiple packets)
-      last_sent_idx = last_ack_count;
-    } else {
-      // No ACK or no progress, still increment our sent index
-      last_sent_idx += packet_size;
-    }
+    NETSTACK_NETWORK.output(&last_neighbor);
     
-    // Small delay between packets
+    // Update last sent index
+    last_sent_idx += packet_size;
+    
+    // Small delay between packets (but don't wait for ACK)
     etimer_set(&packet_timer, CLOCK_SECOND / 5);
     PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_TIMER);
   }
   
-  // Final verification - check if all data was received
+  // After sending all packets, wait for final acknowledgment
+  printf("All packets sent. Waiting for final acknowledgment...\n");
+  
+  // Wait for up to 5 seconds for the final ACK
+  etimer_set(&ack_timer, CLOCK_SECOND * 5);
+  
+  PROCESS_WAIT_EVENT_UNTIL((ev == PROCESS_EVENT_CONTINUE) || 
+                          (ev == PROCESS_EVENT_TIMER && etimer_expired(&ack_timer)));
+  
   if (last_ack_count >= reading_count) {
-    printf("Data transfer complete, all %u readings confirmed received\n", reading_count);
+    printf("Received final ACK. All %u readings confirmed received.\n", reading_count);
+  } else if (etimer_expired(&ack_timer)) {
+    printf("No acknowledgment received. Transfer may have failed.\n");
   } else {
-    printf("Data transfer ended, %u/%u readings confirmed received\n", 
+    printf("Partial acknowledgment received. %u of %u readings confirmed.\n", 
            last_ack_count, reading_count);
   }
   
