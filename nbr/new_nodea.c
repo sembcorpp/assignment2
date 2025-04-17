@@ -10,6 +10,7 @@
 #include "net/linkaddr.h"
 #include "board-peripherals.h"
 #include "node-id.h"
+#include "net/netstack.h"
 
 #define RSSI_THRESHOLD -70
 #define MAX_READINGS 60
