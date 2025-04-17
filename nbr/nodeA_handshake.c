@@ -67,6 +67,9 @@ static linkaddr_t last_neighbor;
 static uint8_t ok_to_send_received = 0;
 static uint8_t ready_to_start_transfer = 0;
 
+static signed short last_beacon_rssi = -128;
+static unsigned long beacon_src_id = 0;
+
 static void init_sensors(void) {
   SENSORS_ACTIVATE(opt_3001_sensor);
   mpu_9250_sensor.configure(SENSORS_ACTIVE, MPU_9250_SENSOR_TYPE_ALL);
@@ -74,7 +77,7 @@ static void init_sensors(void) {
 
 // Read light sensor (in lux)
 static int16_t read_light_sensor(void) {
-  int value = opt_3001_sensor.value(0);
+  int value = opt_3001_sensor.value(0) / 100;
   if (value == CC26XX_SENSOR_READING_ERROR) {
     printf("Error reading light sensor\n");
     return -1;
@@ -135,10 +138,14 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
 
     if (packet_type == PACKET_TYPE_BEACON && len == sizeof(beacon_packet_struct)) {
       beacon_packet_struct *beacon = (beacon_packet_struct *)data;
+			signed short beacon_rssi = packetbuf_attr(PACKETBUF_ATTR_RSSI); 
+
       printf("%lu DETECT %lu\n", clock_time() / CLOCK_SECOND, beacon->src_id);
 
-      if (rssi >= RSSI_THRESHOLD && reading_count == 60) {
+      if (rssi >= RSSI_THRESHOLD && reading_count == MAX_READINGS && !ready_to_start_transfer) {
         linkaddr_copy(&last_neighbor, src);
+				last_beacon_rssi = beacon_rssi;
+				beacon_src_id = beacon->src_id;
         ready_to_start_transfer = 1;
         process_start(&data_transfer_process, NULL);
       }
@@ -204,6 +211,8 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
     PROCESS_EXIT();
   }
 
+	printf("%lu TRANSFER %lu RSSI: %d\n", clock_time() / CLOCK_SECOND, beacon_src_id, last_beacon_rssi);
+
 	printf("reading_count = %u, last_sent_idx = %u\n", reading_count, last_sent_idx);
 
   if (reading_count > last_sent_idx) {
@@ -245,5 +254,11 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
   NETSTACK_NETWORK.output(&last_neighbor);
   printf("Sent FINISH_SENDING\n");
 
+
+	reading_count = 0;
+	last_sent_idx = 0;
+	ok_to_send_received = 0;
+	ready_to_start_transfer = 0;
+	first_reading = 1;
   PROCESS_END();
 }
