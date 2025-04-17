@@ -57,6 +57,12 @@ static unsigned int reading_count = 0;
 static unsigned int last_sent_idx = 0;
 static struct etimer sensing_timer;
 
+// Variables for motion detection
+static int prev_ax = 0;
+static int prev_ay = 0;
+static int prev_az = 0;
+static uint8_t first_reading = 1;
+
 static linkaddr_t last_neighbor;
 static uint8_t ok_to_send_received = 0;
 static uint8_t ready_to_start_transfer = 0;
@@ -66,27 +72,61 @@ static void init_sensors(void) {
   mpu_9250_sensor.configure(SENSORS_ACTIVE, MPU_9250_SENSOR_TYPE_ALL);
 }
 
+// Read light sensor (in lux)
 static int16_t read_light_sensor(void) {
-  int value = opt_3001_sensor.value(0) / 100;
-  if (value == CC26XX_SENSOR_READING_ERROR) return -1;
+  int value = opt_3001_sensor.value(0);
+  if (value == CC26XX_SENSOR_READING_ERROR) {
+    printf("Error reading light sensor\n");
+    return -1;
+  }
+  // Reactivate light sensor for next reading
+  SENSORS_ACTIVATE(opt_3001_sensor);
   return (int16_t)value;
 }
 
+// Read motion sensor (accelerometer magnitude)
 static int16_t read_motion_sensor(void) {
-  static int prev_ax = 0, prev_ay = 0, prev_az = 0;
-  static uint8_t first = 1;
+  // Get accelerometer readings
   int ax = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_ACC_X);
   int ay = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_ACC_Y);
   int az = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_ACC_Z);
-  if (ax == CC26XX_SENSOR_READING_ERROR || ay == CC26XX_SENSOR_READING_ERROR || az == CC26XX_SENSOR_READING_ERROR) return -1;
-  int motion = 0;
-  if (!first) {
-    int dx = ax - prev_ax, dy = ay - prev_ay, dz = az - prev_az;
-    motion = (dx*dx + dy*dy + dz*dz) / 100;
-  } else first = 0;
-  prev_ax = ax; prev_ay = ay; prev_az = az;
-  return (int16_t)motion;
+  
+  // Check for sensor errors
+  if (ax == CC26XX_SENSOR_READING_ERROR || 
+      ay == CC26XX_SENSOR_READING_ERROR || 
+      az == CC26XX_SENSOR_READING_ERROR) {
+    printf("Error reading motion sensor\n");
+    return -1;
+  }
+  
+  // Calculate motion (change in acceleration)
+  int16_t motion_value = 0;
+  
+  if (!first_reading) {
+    // Calculate difference from previous readings
+    int dx = ax - prev_ax;
+    int dy = ay - prev_ay;
+    int dz = az - prev_az;
+    
+    // Calculate magnitude of change vector
+    int32_t squared_delta = (int32_t)dx * dx + (int32_t)dy * dy + (int32_t)dz * dz;
+    motion_value = (int16_t)(squared_delta / 100);
+  } else {
+    // First reading, no previous value to compare
+    first_reading = 0;
+  }
+  
+  // Store current values for next comparison
+  prev_ax = ax;
+  prev_ay = ay;
+  prev_az = az;
+  
+  // Reactivate motion sensor for next reading
+  mpu_9250_sensor.configure(SENSORS_ACTIVE, MPU_9250_SENSOR_TYPE_ALL);
+  
+  return motion_value;
 }
+
 
 void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *src, const linkaddr_t *dest) {
   if (len >= sizeof(uint8_t)) {
@@ -97,7 +137,7 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
       beacon_packet_struct *beacon = (beacon_packet_struct *)data;
       printf("%lu DETECT %lu\n", clock_time() / CLOCK_SECOND, beacon->src_id);
 
-      if (rssi >= RSSI_THRESHOLD && reading_count > 0) {
+      if (rssi >= RSSI_THRESHOLD && reading_count == 60) {
         linkaddr_copy(&last_neighbor, src);
         ready_to_start_transfer = 1;
         process_start(&data_transfer_process, NULL);
@@ -124,6 +164,7 @@ PROCESS_THREAD(sensing_process, ev, data) {
     if (reading_count < MAX_READINGS) {
       light_readings[reading_count] = light;
       motion_readings[reading_count] = motion;
+			printf("Reading %u: Light: %d lux, Motion: %d\n", reading_count, light, motion);
       reading_count++;
     }
   }
@@ -147,6 +188,7 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
   handshake_packet.timestamp = clock_time();
   handshake_packet.seq = 0;
 
+
   while (!ok_to_send_received && retries < MAX_RETRIES) {
     nullnet_buf = (uint8_t *)&handshake_packet;
     nullnet_len = sizeof(handshake_packet);
@@ -162,9 +204,14 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
     PROCESS_EXIT();
   }
 
+	printf("reading_count = %u, last_sent_idx = %u\n", reading_count, last_sent_idx);
+
   if (reading_count > last_sent_idx) {
     total_packets = (reading_count - last_sent_idx + READINGS_PER_PACKET - 1) / READINGS_PER_PACKET;
   }
+
+	printf("total_packets = %u\n", total_packets);
+
   if (total_packets == 0) {
     printf("No data to send.\n");
     PROCESS_EXIT();
