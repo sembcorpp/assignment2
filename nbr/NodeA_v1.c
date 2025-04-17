@@ -28,12 +28,6 @@
 // Maximum readings to send in one packet
 #define READINGS_PER_PACKET 10
 
-// Maximum transmission attempts
-#define MAX_RETRIES 3
-
-// Timeout for acknowledgment
-#define ACK_TIMEOUT (CLOCK_SECOND * 2)
-
 // Beacon packet structure
 typedef struct {
   uint8_t packet_type;
@@ -69,7 +63,6 @@ static struct etimer sensing_timer;
 // Variables for data transfer
 static unsigned int last_ack_count = 0;
 static struct etimer ack_timer;
-static unsigned int retry_count = 0;
 
 // Variables for motion detection
 static int prev_ax = 0;
@@ -152,9 +145,12 @@ static int16_t read_motion_sensor(void) {
 
 // Function called after reception of a packet
 void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *src, const linkaddr_t *dest) {
+  printf("Received packet: len=%u\n", len);  // Debug: Show packet length
+  
   // Check if the received packet is a beacon
   if (len >= sizeof(uint8_t)) {
     uint8_t packet_type = *(uint8_t *)data;
+    printf("Packet type: %u\n", packet_type);  // Debug: Show packet type
     
     if (packet_type == PACKET_TYPE_BEACON && len == sizeof(beacon_packet_struct)) {
       beacon_packet_struct *received_packet = (beacon_packet_struct *)data;
@@ -207,7 +203,11 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
       // Signal receipt of acknowledgment
       etimer_stop(&ack_timer);
       process_post(&data_transfer_process, PROCESS_EVENT_CONTINUE, NULL);
+    } else {
+      printf("Unknown or unsupported packet type: %u, len: %u\n", packet_type, len);
     }
+  } else {
+    printf("Packet too small to process\n");
   }
 }
 
@@ -256,43 +256,12 @@ PROCESS_THREAD(sensing_process, ev, data) {
       
       reading_count++;
       
-      // Print message when buffer is full (60 readings collected)
+      // If buffer is now full, show message
       if (reading_count == MAX_READINGS) {
-        printf("Buffer full with %u readings - ready for transfer\n", reading_count);
+        printf("All 60 readings collected, ready for transfer\n");
       }
     } else {
-      // Buffer full - implement circular buffer
-      
-      // Check if we've sent all data
-      if (last_sent_idx >= MAX_READINGS) {
-        // Reset buffer and counters
-        reading_count = 0;
-        last_sent_idx = 0;
-        
-        // Store new reading
-        light_readings[0] = light;
-        motion_readings[0] = motion;
-        printf("Reset buffer - Reading 0: Light: %d lux, Motion: %d\n", light, motion);
-        reading_count = 1;
-      } else {
-        // Shift readings (circular buffer)
-        unsigned int i;
-        for (i = 0; i < MAX_READINGS - 1; i++) {
-          light_readings[i] = light_readings[i + 1];
-          motion_readings[i] = motion_readings[i + 1];
-        }
-        
-        // Add new reading at the end
-        light_readings[MAX_READINGS - 1] = light;
-        motion_readings[MAX_READINGS - 1] = motion;
-        
-        printf("Buffer full - Added new reading (circular buffer)\n");
-        
-        // Adjust sent index if needed
-        if (last_sent_idx > 0) {
-          last_sent_idx--;
-        }
-      }
+      printf("Buffer full, waiting for transfer to Node B\n");
     }
   }
   
@@ -303,75 +272,78 @@ PROCESS_THREAD(sensing_process, ev, data) {
 PROCESS_THREAD(data_transfer_process, ev, data) {
   PROCESS_BEGIN();
   
-  static data_packet_struct data_packet;
-  static unsigned int packet_count;
-  static unsigned int total_packets;
-  static unsigned int packet_size = 0;  // Initialize to avoid compiler warning
   static struct etimer packet_timer;
+  static data_packet_struct data_packet;
   
-  // Initialize data packet
+  // Initialize the data packet
   data_packet.packet_type = PACKET_TYPE_DATA;
   data_packet.src_id = node_id;
   
-  // Calculate number of packets needed
-  total_packets = (reading_count - last_sent_idx + READINGS_PER_PACKET - 1) / READINGS_PER_PACKET;
+  printf("Starting data transfer process\n");
   
-  printf("Starting data transfer: %u readings to send (from index %u to %u)\n", 
-         reading_count - last_sent_idx, last_sent_idx, reading_count - 1);
+  // Reset the last sent index
+  last_sent_idx = 0;
   
-  // Send all packets without waiting for intermediate ACKs
-  for (packet_count = 0; packet_count < total_packets; packet_count++) {
-    // Calculate readings for this packet
-    unsigned int remaining = reading_count - last_sent_idx;
-    packet_size = (remaining < READINGS_PER_PACKET) ? remaining : READINGS_PER_PACKET;
+  // While we have more readings to send
+  while (last_sent_idx < reading_count) {
+    // Calculate how many readings to send in this packet
+    unsigned int readings_to_send = reading_count - last_sent_idx;
+    if (readings_to_send > READINGS_PER_PACKET) {
+      readings_to_send = READINGS_PER_PACKET;
+    }
     
-    // Fill packet with readings
+    // Fill the data packet
     data_packet.start_idx = last_sent_idx;
-    data_packet.num_readings = packet_size;
+    data_packet.num_readings = readings_to_send;
     
-    // Copy readings to packet
     unsigned int i;
-    for (i = 0; i < packet_size; i++) {
+    for (i = 0; i < readings_to_send; i++) {
       data_packet.light_readings[i] = light_readings[last_sent_idx + i];
       data_packet.motion_readings[i] = motion_readings[last_sent_idx + i];
     }
     
-    // Send packet
+    // Set the nullnet buffer
     nullnet_buf = (uint8_t *)&data_packet;
     nullnet_len = sizeof(data_packet);
     
-    printf("Sending packet %u/%u with %u readings starting at index %u\n", 
-           packet_count + 1, total_packets, data_packet.num_readings, data_packet.start_idx);
+    // Send the packet
+    int status = NETSTACK_NETWORK.output(&last_neighbor);
+    if (status != 0) {
+      printf("ERROR: Failed to send data packet, error code: %d\n", status);
+    }
     
-    NETSTACK_NETWORK.output(&last_neighbor);
+    // Set a timeout for acknowledgment (1 second)
+    etimer_set(&ack_timer, CLOCK_SECOND);
     
-    // Update last sent index
-    last_sent_idx += packet_size;
+    // Wait for acknowledgment or timeout
+    PROCESS_WAIT_EVENT();
     
-    // Small delay between packets (but don't wait for ACK)
-    etimer_set(&packet_timer, CLOCK_SECOND / 5);
-    PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_TIMER);
+    if (ev == PROCESS_EVENT_TIMER && data == &ack_timer) {
+      // Timeout, retry send
+      printf("Acknowledgment timeout, retrying...\n");
+      continue; // Retry sending the same packet
+    }
+    else if (ev == PROCESS_EVENT_CONTINUE) {
+      // Received acknowledgment, check how many were acknowledged
+      if (last_ack_count > last_sent_idx) {
+        // Update last sent index with acknowledged count
+        last_sent_idx = last_ack_count;
+        printf("Successfully sent readings up to index %u\n", last_sent_idx);
+        
+        // Wait a bit before sending the next packet (to avoid flooding)
+        etimer_set(&packet_timer, CLOCK_SECOND / 4);
+        PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_TIMER && data == &packet_timer);
+      } else {
+        printf("No progress in acknowledgment, still at index %u\n", last_sent_idx);
+        
+        // Wait a bit longer before retrying
+        etimer_set(&packet_timer, CLOCK_SECOND / 2);
+        PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_TIMER && data == &packet_timer);
+      }
+    }
   }
   
-  // After sending all packets, wait for final acknowledgment
-  printf("All packets sent. Waiting for final acknowledgment...\n");
-  
-  // Wait for up to 5 seconds for the final ACK
-  etimer_set(&ack_timer, CLOCK_SECOND * 5);
-  
-  PROCESS_WAIT_EVENT_UNTIL((ev == PROCESS_EVENT_CONTINUE) || 
-                          (ev == PROCESS_EVENT_TIMER && etimer_expired(&ack_timer)));
-  
-  if (last_ack_count >= reading_count) {
-    printf("Received final ACK. All %u readings confirmed received.\n", reading_count);
-  } else if (etimer_expired(&ack_timer)) {
-    printf("No acknowledgment received. Transfer may have failed.\n");
-  } else {
-    printf("Partial acknowledgment received. %u of %u readings confirmed.\n", 
-           last_ack_count, reading_count);
-  }
-  
-  // Transfer complete
+  printf("Data transfer complete - all %u readings sent\n", reading_count);
   data_transfer_active = 0;
   
   PROCESS_END();
