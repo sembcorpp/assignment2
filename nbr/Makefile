@@ -1,4 +1,4 @@
-CONTIKI_PROJECT = NodeA_v1 NodeB_v1
+CONTIKI_PROJECT = NodeA_v1 NodeB_v1 nodeA_handshake nodeB_handshake
 all: $(CONTIKI_PROJECT)
 
 CONTIKI = ../..
