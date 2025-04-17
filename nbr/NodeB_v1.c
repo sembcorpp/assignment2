@@ -64,7 +64,6 @@ static int16_t received_motion_readings[MAX_READINGS];
 static unsigned int received_readings_count = 0;
 static uint8_t data_reception_active = 0;
 static linkaddr_t data_sender_addr;  // Address of the node sending data
-static struct etimer ack_timer;      // Timer for sending acknowledgments
 static unsigned long last_packet_time = 0;  // Time of last packet reception
 
 PROCESS(nbr_discovery_process, "Node B - Broadcaster and Receiver");
@@ -72,6 +71,7 @@ AUTOSTART_PROCESSES(&nbr_discovery_process);
 
 // Function called after reception of a packet
 void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *src, const linkaddr_t *dest) {
+  
   if (len >= sizeof(uint8_t)) {
     uint8_t packet_type = *(uint8_t *)data;
     
@@ -86,79 +86,87 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
       // Log detection in required format
       printf("%lu DETECT %lu\n", curr_timestamp / CLOCK_SECOND, beacon->src_id);
     }
-    
     // Handle data packet
-    else if (packet_type == PACKET_TYPE_DATA && len == sizeof(data_packet_struct)) {
-      data_packet_struct *data_packet = (data_packet_struct *)data;
+    else if (packet_type == PACKET_TYPE_DATA) {
       
-      // Keep radio on while receiving data
-      NETSTACK_RADIO.on();
-      data_reception_active = 1;
-      last_packet_time = curr_timestamp;
-      
-      // Store sender address for acknowledgments
-      linkaddr_copy(&data_sender_addr, src);
-      
-      // Process and store the readings
-      unsigned int i;
-      for (i = 0; i < data_packet->num_readings && 
-           data_packet->start_idx + i < MAX_READINGS; i++) {
+      if (len == sizeof(data_packet_struct)) {
+        data_packet_struct *data_packet = (data_packet_struct *)data;
         
-        unsigned int idx = data_packet->start_idx + i;
-        if (idx < MAX_READINGS) {
-          received_light_readings[idx] = data_packet->light_readings[i];
-          received_motion_readings[idx] = data_packet->motion_readings[i];
+        // Keep radio on while receiving data
+        NETSTACK_RADIO.on();
+        data_reception_active = 1;
+        last_packet_time = curr_timestamp;
+        
+        // Store sender address for acknowledgments
+        linkaddr_copy(&data_sender_addr, src);
+        
+        // Process and store the readings
+        unsigned int i;
+        for (i = 0; i < data_packet->num_readings && 
+             data_packet->start_idx + i < MAX_READINGS; i++) {
           
-          // Update count of received readings if needed
-          if (idx + 1 > received_readings_count) {
-            received_readings_count = idx + 1;
+          unsigned int idx = data_packet->start_idx + i;
+          if (idx < MAX_READINGS) {
+            received_light_readings[idx] = data_packet->light_readings[i];
+            received_motion_readings[idx] = data_packet->motion_readings[i];
+            
+            // Update count of received readings if needed
+            if (idx + 1 > received_readings_count) {
+              received_readings_count = idx + 1;
+            }
           }
         }
+        
+        printf("Received data packet from %lu with %u readings starting at index %u (RSSI: %d)\n",
+               data_packet->src_id, data_packet->num_readings, data_packet->start_idx, rssi);
+               
+        // If we've received a complete set, send acknowledgment and display readings
+        if (received_readings_count == MAX_READINGS) {
+          // Send final acknowledgment packet
+          static ack_packet_struct ack_packet;
+          ack_packet.packet_type = PACKET_TYPE_ACK;
+          ack_packet.src_id = node_id;
+          ack_packet.received_count = received_readings_count;
+          
+          nullnet_buf = (uint8_t *)&ack_packet;
+          nullnet_len = sizeof(ack_packet);
+          NETSTACK_NETWORK.output(&data_sender_addr);
+          
+          printf("Sent final ACK for all %u readings\n", received_readings_count);
+          
+          // Display readings
+          printf("Light: ");
+          for (i = 0; i < received_readings_count; i++) {
+            printf("%d", received_light_readings[i]);
+            if (i < received_readings_count - 1) {
+              printf(", ");
+            }
+          }
+          printf("\n");
+          
+          printf("Motion: ");
+          for (i = 0; i < received_readings_count; i++) {
+            printf("%d", received_motion_readings[i]);
+            if (i < received_readings_count - 1) {
+              printf(", ");
+            }
+          }
+          printf("\n");
+          
+          printf("Successfully received all %u readings!\n", MAX_READINGS);
+          
+          // Reset for next round
+          received_readings_count = 0;
+          data_reception_active = 0;
+        }
+      } else {
+        printf("ERROR: Mismatched data packet size\n");  // Debug
       }
-      
-      printf("Received data packet from %lu with %u readings starting at index %u (RSSI: %d)\n",
-             data_packet->src_id, data_packet->num_readings, data_packet->start_idx, rssi);
-             
-      // If we've received a complete set, send acknowledgment and display readings
-      if (received_readings_count == MAX_READINGS) {
-        // Send final acknowledgment packet
-        static ack_packet_struct ack_packet;
-        ack_packet.packet_type = PACKET_TYPE_ACK;
-        ack_packet.src_id = node_id;
-        ack_packet.received_count = received_readings_count;
-        
-        nullnet_buf = (uint8_t *)&ack_packet;
-        nullnet_len = sizeof(ack_packet);
-        NETSTACK_NETWORK.output(&data_sender_addr);
-        
-        printf("Sent final ACK for all %u readings\n", received_readings_count);
-        
-        // Display readings
-        printf("Light: ");
-        for (i = 0; i < received_readings_count; i++) {
-          printf("%d", received_light_readings[i]);
-          if (i < received_readings_count - 1) {
-            printf(", ");
-          }
-        }
-        printf("\n");
-        
-        printf("Motion: ");
-        for (i = 0; i < received_readings_count; i++) {
-          printf("%d", received_motion_readings[i]);
-          if (i < received_readings_count - 1) {
-            printf(", ");
-          }
-        }
-        printf("\n");
-        
-        printf("Successfully received all %u readings!\n", MAX_READINGS);
-        
-        // Reset for next round
-        received_readings_count = 0;
-        data_reception_active = 0;
-      }
+    } else {
+      printf("Unknown or invalid packet type", packet_type);  // Debug
     }
+  } else {
+    printf("Packet too small to process\n");  // Debug
   }
 }
 
@@ -249,17 +257,13 @@ PROCESS_THREAD(nbr_discovery_process, ev, data) {
 
   // Keep the process alive and handle periodic tasks
   while(1) {
-    PROCESS_YIELD();
-    
-    // If data reception is active but no packet received for 5 seconds
-    if (data_reception_active && 
-        clock_time() > last_packet_time + (5 * CLOCK_SECOND)) {
+    // Check for timeout in data reception
+    if (data_reception_active && (clock_time() - last_packet_time > CLOCK_SECOND * 5)) {
+      printf("Data reception timed out\n");
       
-      printf("Data transfer timed out. Received %u/60 readings.\n", 
-             received_readings_count);
-             
-      // If we received some readings, send an ACK for what we got
+      // If we have received some but not all readings, still send what we have
       if (received_readings_count > 0) {
+        // Send acknowledgment for what we've received
         static ack_packet_struct ack_packet;
         ack_packet.packet_type = PACKET_TYPE_ACK;
         ack_packet.src_id = node_id;
@@ -269,13 +273,36 @@ PROCESS_THREAD(nbr_discovery_process, ev, data) {
         nullnet_len = sizeof(ack_packet);
         NETSTACK_NETWORK.output(&data_sender_addr);
         
-        printf("Sent timeout ACK for %u readings\n", received_readings_count);
+        printf("Timed out, sent ACK for %u readings\n", received_readings_count);
+        
+        // Display readings
+        unsigned int i;
+        printf("Partial Light: ");
+        for (i = 0; i < received_readings_count; i++) {
+          printf("%d", received_light_readings[i]);
+          if (i < received_readings_count - 1) {
+            printf(", ");
+          }
+        }
+        printf("\n");
+        
+        printf("Partial Motion: ");
+        for (i = 0; i < received_readings_count; i++) {
+          printf("%d", received_motion_readings[i]);
+          if (i < received_readings_count - 1) {
+            printf(", ");
+          }
+        }
+        printf("\n");
       }
       
-      // Reset state for next transfer
+      // Reset for next round
+      received_readings_count = 0;
       data_reception_active = 0;
     }
+    
+    PROCESS_YIELD();
   }
-
+  
   PROCESS_END();
 }
