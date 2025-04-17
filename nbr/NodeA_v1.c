@@ -155,7 +155,7 @@ PROCESS_THREAD(sensing_process, ev, data) {
     // Wait for timer
     PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_TIMER);
     
-    // If we have space in our buffer
+    // If we have space in our buffer or all data has been sent
     if (reading_count < MAX_READINGS) {
       // Read sensors
       light_readings[reading_count] = read_light_sensor();
@@ -165,11 +165,42 @@ PROCESS_THREAD(sensing_process, ev, data) {
       
       reading_count++;
     } else {
-      printf("Buffer full, stopping data collection\n");
-      // Reset if we've sent all readings
+      // Buffer is full
+      printf("Buffer full, implementing circular buffer approach\n");
+      
+      // Check if we've sent all data
       if (last_sent_idx >= MAX_READINGS) {
+        // All data sent, reset counters
         reading_count = 0;
         last_sent_idx = 0;
+        
+        // Take new reading at position 0
+        light_readings[reading_count] = read_light_sensor();
+        motion_readings[reading_count] = read_motion_sensor();
+        
+        printf("Reading %u: Light: %d, Motion: %d\n", reading_count, light_readings[reading_count], motion_readings[reading_count]);
+        
+        reading_count++;
+      } else {
+        // We haven't sent all data, but buffer is full
+        // Implement circular buffer - shift readings to make room for new ones
+        unsigned int i;
+        for (i = 0; i < MAX_READINGS - 1; i++) {
+          light_readings[i] = light_readings[i + 1];
+          motion_readings[i] = motion_readings[i + 1];
+        }
+        
+        // Add new reading at the end
+        light_readings[MAX_READINGS - 1] = read_light_sensor();
+        motion_readings[MAX_READINGS - 1] = read_motion_sensor();
+        
+        printf("New Reading (shifted buffer): Light: %d, Motion: %d\n", 
+               light_readings[MAX_READINGS - 1], motion_readings[MAX_READINGS - 1]);
+        
+        // If we've already sent some readings, adjust last_sent_idx
+        if (last_sent_idx > 0) {
+          last_sent_idx--;
+        }
       }
     }
   }
@@ -194,19 +225,25 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
   // Calculate how many packets needed
   total_packets = (reading_count - last_sent_idx + readings_per_packet - 1) / readings_per_packet;
   
-  printf("Starting data transfer: %u readings to send\n", reading_count - last_sent_idx);
+  printf("Starting data transfer: %u readings to send (from index %u to %u)\n", 
+         reading_count - last_sent_idx, last_sent_idx, reading_count - 1);
   
   for (packet_count = 0; packet_count < total_packets; packet_count++) {
+    // Calculate actual number of readings in this packet
+    unsigned int remaining = reading_count - last_sent_idx;
+    unsigned int packet_size = (remaining < readings_per_packet) ? remaining : readings_per_packet;
+    
     // Fill data packet with readings
     data_packet.start_idx = last_sent_idx;
-    data_packet.num_readings = (reading_count - last_sent_idx < readings_per_packet) ? 
-                              reading_count - last_sent_idx : readings_per_packet;
+    data_packet.num_readings = packet_size;
     
     // Copy readings to packet
     unsigned int i;
-    for (i = 0; i < data_packet.num_readings; i++) {
-      data_packet.light_readings[i] = light_readings[last_sent_idx + i];
-      data_packet.motion_readings[i] = motion_readings[last_sent_idx + i];
+    for (i = 0; i < packet_size; i++) {
+      if (last_sent_idx + i < reading_count) {
+        data_packet.light_readings[i] = light_readings[last_sent_idx + i];
+        data_packet.motion_readings[i] = motion_readings[last_sent_idx + i];
+      }
     }
     
     // Send packet
@@ -219,14 +256,15 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
     NETSTACK_NETWORK.output(&last_neighbor);
     
     // Update last sent index
-    last_sent_idx += data_packet.num_readings;
+    last_sent_idx += packet_size;
     
     // Small delay between packets
     etimer_set(&packet_timer, CLOCK_SECOND / 5);
     PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_TIMER);
   }
   
-  printf("Data transfer complete, sent %u readings\n", last_sent_idx);
+  printf("Data transfer complete, sent %u readings (last_sent_idx = %u)\n", 
+         reading_count - (reading_count - last_sent_idx), last_sent_idx);
   data_transfer_active = 0;
   
   PROCESS_END();
