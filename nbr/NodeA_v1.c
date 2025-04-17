@@ -67,7 +67,7 @@ AUTOSTART_PROCESSES(&sensing_process);
 static void init_sensors(void) {
   printf("Initializing sensors...\n");
   SENSORS_ACTIVATE(opt_3001_sensor);
-  SENSORS_ACTIVATE(mpu_9250_sensor);
+  mpu_9250_sensor.configure(SENSORS_ACTIVE, MPU_9250_SENSOR_TYPE_ALL);
 }
 
 // Read light sensor (in lux)
@@ -102,8 +102,8 @@ static int16_t read_motion_sensor(void) {
   int32_t squared_magnitude = (int32_t)ax * ax + (int32_t)ay * ay + (int32_t)az * az;
   int16_t scaled_magnitude = (int16_t)(squared_magnitude / 100);
   
-  // Reactivate motion sensor for next reading
-  SENSORS_ACTIVATE(mpu_9250_sensor);
+  // Reactivate motion sensor for next reading - use configure instead of SENSORS_ACTIVATE
+  mpu_9250_sensor.configure(SENSORS_ACTIVE, MPU_9250_SENSOR_TYPE_ALL);
   
   return scaled_magnitude;
 }
