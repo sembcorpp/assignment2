@@ -116,7 +116,7 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
         }
       }
       
-      printf("Received data packet from %lu with %lu readings starting at index %lu (RSSI: %d)\n",
+      printf("Received data packet from %lu with %u readings starting at index %u (RSSI: %d)\n",
              data_packet->src_id, data_packet->num_readings, data_packet->start_idx, rssi);
              
       // Send acknowledgment packet
@@ -129,7 +129,7 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
       nullnet_len = sizeof(ack_packet);
       NETSTACK_NETWORK.output(&data_sender_addr);
       
-      printf("Sent ACK to %u, received %u/60 readings\n", 
+      printf("Sent ACK to %lu, received %u/60 readings\n", 
              data_packet->src_id, received_readings_count);
       
       // Set timer to periodically send acknowledgments if no new data received
