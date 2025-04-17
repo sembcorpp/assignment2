@@ -83,18 +83,22 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
     }
 
     else if (packet_type == PACKET_TYPE_DATA && len == sizeof(data_packet_struct)) {
+			printf("INSIDE PACKET_TYPE_DATA");
       data_packet_struct *data_packet = (data_packet_struct *)data;
       unsigned int i;
       for (i = 0; i < data_packet->num_readings && data_packet->start_idx + i < MAX_READINGS; i++) {
+				printf("START OF FOR LOOP");
         unsigned int idx = data_packet->start_idx + i;
         received_light_readings[idx] = data_packet->light_readings[i];
         received_motion_readings[idx] = data_packet->motion_readings[i];
         if (idx + 1 > received_readings_count) {
           received_readings_count = idx + 1;
         }
+				printf("END OF FOR LOOP, Reading: %u\n", received_readings_count);
       }
-      printf("Received DATA from %lu: %lu readings from index %lu\n", data_packet->src_id, data_packet->num_readings, data_packet->start_idx);
-
+			printf("AFTER FOR LOOP");
+      // printf("Received DATA from %lu: %lu readings from index %lu\n", data_packet->src_id, data_packet->num_readings, data_packet->start_idx);
+			printf("received_readings_count: %u, MAX_READINGS: %u\n", received_readings_count,MAX_READINGS);
       if (received_readings_count == MAX_READINGS) {
         printf("Light: ");
         for (i = 0; i < received_readings_count; i++) {
@@ -140,18 +144,33 @@ char sender_scheduler(struct rtimer *t, void *ptr) {
         }
       }
 
-      rtimer_set(t, RTIMER_TIME(t) + WAKE_TIME, 1, (rtimer_callback_t)sender_scheduler, ptr);
-      PT_YIELD(&pt);
+      // rtimer_set(t, RTIMER_TIME(t) + WAKE_TIME, 1, (rtimer_callback_t)sender_scheduler, ptr);
+      // PT_YIELD(&pt);
 
-      printf("Radio OFF\n");
-      NETSTACK_RADIO.off();
+      // printf("Radio OFF\n");
+      // NETSTACK_RADIO.off();
 
-      NumSleep = random_rand() % (2 * SLEEP_CYCLE + 1);
-      printf("Sleep for %d slots\n", NumSleep);
-      for(i = 0; i < NumSleep; i++) {
-        rtimer_set(t, RTIMER_TIME(t) + SLEEP_SLOT, 1, (rtimer_callback_t)sender_scheduler, ptr);
-        PT_YIELD(&pt);
-      }
+      // NumSleep = random_rand() % (2 * SLEEP_CYCLE + 1);
+      // printf("Sleep for %d slots\n", NumSleep);
+      // for(i = 0; i < NumSleep; i++) {
+      //   rtimer_set(t, RTIMER_TIME(t) + SLEEP_SLOT, 1, (rtimer_callback_t)sender_scheduler, ptr);
+      //   PT_YIELD(&pt);
+      // }
+
+			if (!listening_for_data) {
+				rtimer_set(t, RTIMER_TIME(t) + WAKE_TIME, 1, (rtimer_callback_t)sender_scheduler, ptr);
+				PT_YIELD(&pt);
+
+				printf("Radio OFF\n");
+				NETSTACK_RADIO.off();
+
+				NumSleep = random_rand() % (2 * SLEEP_CYCLE + 1);
+				printf("Sleep for %d slots\n", NumSleep);
+				for(i = 0; i < NumSleep; i++) {
+						rtimer_set(t, RTIMER_TIME(t) + SLEEP_SLOT, 1, (rtimer_callback_t)sender_scheduler, ptr);
+						PT_YIELD(&pt);
+				}
+			}
     } else {
       rtimer_set(t, RTIMER_TIME(t) + CLOCK_SECOND, 1, (rtimer_callback_t)sender_scheduler, ptr);
       PT_YIELD(&pt);
