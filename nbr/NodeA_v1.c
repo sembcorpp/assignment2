@@ -52,6 +52,12 @@ static unsigned int reading_count = 0;
 static unsigned int last_sent_idx = 0;
 static struct etimer sensing_timer;
 
+// Variables for motion detection
+static int prev_ax = 0;
+static int prev_ay = 0;
+static int prev_az = 0;
+static uint8_t first_reading = 1;
+
 // Variables for node discovery
 static linkaddr_t last_neighbor;
 static int8_t last_rssi = -128;
@@ -97,15 +103,32 @@ static int16_t read_motion_sensor(void) {
     return -1;
   }
   
-  // Calculate magnitude approximation
-  // Using int32_t to avoid overflow
-  int32_t squared_magnitude = (int32_t)ax * ax + (int32_t)ay * ay + (int32_t)az * az;
-  int16_t scaled_magnitude = (int16_t)(squared_magnitude / 100);
+  // Calculate motion (change in acceleration)
+  int16_t motion_value = 0;
   
-  // Reactivate motion sensor for next reading - use configure instead of SENSORS_ACTIVATE
+  if (!first_reading) {
+    // Calculate difference from previous readings
+    int dx = ax - prev_ax;
+    int dy = ay - prev_ay;
+    int dz = az - prev_az;
+    
+    // Calculate magnitude of change vector
+    int32_t squared_delta = (int32_t)dx * dx + (int32_t)dy * dy + (int32_t)dz * dz;
+    motion_value = (int16_t)(squared_delta / 100);
+  } else {
+    // First reading, no previous value to compare
+    first_reading = 0;
+  }
+  
+  // Store current values for next comparison
+  prev_ax = ax;
+  prev_ay = ay;
+  prev_az = az;
+  
+  // Reactivate motion sensor for next reading
   mpu_9250_sensor.configure(SENSORS_ACTIVE, MPU_9250_SENSOR_TYPE_ALL);
   
-  return scaled_magnitude;
+  return motion_value;
 }
 
 // Function called after reception of a packet
@@ -181,6 +204,12 @@ PROCESS_THREAD(sensing_process, ev, data) {
     // Wait for timer
     PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_TIMER);
     
+    // Skip collecting new data if transfer is active
+    if (data_transfer_active) {
+      printf("Data transfer active, pausing data collection\n");
+      continue;
+    }
+    
     // Collect new sensor reading
     int16_t light = read_light_sensor();
     int16_t motion = read_motion_sensor();
@@ -194,6 +223,11 @@ PROCESS_THREAD(sensing_process, ev, data) {
              reading_count, light, motion);
       
       reading_count++;
+      
+      // Print message when buffer is full (60 readings collected)
+      if (reading_count == MAX_READINGS) {
+        printf("Buffer full with %u readings - ready for transfer\n", reading_count);
+      }
     } else {
       // Buffer full - implement circular buffer
       
