@@ -202,7 +202,7 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
       // Update last acknowledged count
       last_ack_count = ack_packet->received_count;
       
-      printf("Received ACK: %lu readings confirmed\n", last_ack_count);
+      printf("Received ACK: %u readings confirmed\n", last_ack_count);
       
       // Signal receipt of acknowledgment
       etimer_stop(&ack_timer);
@@ -306,6 +306,7 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
   static data_packet_struct data_packet;
   static unsigned int packet_count;
   static unsigned int total_packets;
+  static unsigned int packet_size = 0;  // Initialize to avoid compiler warning
   static struct etimer packet_timer;
   
   // Initialize data packet
@@ -337,7 +338,7 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
     
     // Calculate readings for this packet
     unsigned int remaining = reading_count - last_sent_idx;
-    unsigned int packet_size = (remaining < READINGS_PER_PACKET) ? remaining : READINGS_PER_PACKET;
+    packet_size = (remaining < READINGS_PER_PACKET) ? remaining : READINGS_PER_PACKET;
     
     // Fill packet with readings
     data_packet.start_idx = last_sent_idx;
@@ -359,7 +360,7 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
       nullnet_buf = (uint8_t *)&data_packet;
       nullnet_len = sizeof(data_packet);
       
-      printf("Sending packet %u/%u with %lu readings starting at index %lu (try %u)\n", 
+      printf("Sending packet %u/%u with %u readings starting at index %u (try %u)\n", 
              packet_count + 1, total_packets, data_packet.num_readings, 
              data_packet.start_idx, retry_count + 1);
       
