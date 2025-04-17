@@ -77,6 +77,8 @@ static int16_t read_light_sensor(void) {
     printf("Error reading light sensor\n");
     return -1;
   }
+  // Reactivate light sensor for next reading
+  SENSORS_ACTIVATE(opt_3001_sensor);
   return (int16_t)value;
 }
 
@@ -99,6 +101,9 @@ static int16_t read_motion_sensor(void) {
   // Using int32_t to avoid overflow
   int32_t squared_magnitude = (int32_t)ax * ax + (int32_t)ay * ay + (int32_t)az * az;
   int16_t scaled_magnitude = (int16_t)(squared_magnitude / 100);
+  
+  // Reactivate motion sensor for next reading
+  SENSORS_ACTIVATE(mpu_9250_sensor);
   
   return scaled_magnitude;
 }
