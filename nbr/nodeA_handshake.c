@@ -1,7 +1,4 @@
-// NodeA with Beacon-Based Discovery and Handshake
-// ===============================
-// Node A - Circular Buffer + Handshake
-// ===============================
+// NodeA with Beacon-Based Handshake and Data Transfer
 
 #include "contiki.h"
 #include "net/netstack.h"
@@ -27,6 +24,17 @@
 #define PACKET_TYPE_OK_TO_RECEIVE  4
 #define PACKET_TYPE_FINISH_SENDING 5
 
+PROCESS(sensing_process, "Sensing Process");
+PROCESS(data_transfer_process, "Data Transfer with Handshake");
+AUTOSTART_PROCESSES(&sensing_process);
+
+typedef struct {
+  uint8_t packet_type;
+  unsigned long src_id;
+  unsigned long timestamp;
+  unsigned long seq;
+} beacon_packet_struct;
+
 typedef struct {
   uint8_t packet_type;
   unsigned long src_id;
@@ -45,17 +53,13 @@ typedef struct {
 
 static int16_t light_readings[MAX_READINGS];
 static int16_t motion_readings[MAX_READINGS];
-static unsigned int write_index = 0;
-static uint8_t buffer_full = 0;
+static unsigned int reading_count = 0;
+static unsigned int last_sent_idx = 0;
 static struct etimer sensing_timer;
 
 static linkaddr_t last_neighbor;
 static uint8_t ok_to_send_received = 0;
-static uint8_t data_transfer_active = 0;
-
-PROCESS(sensing_process, "Sensing Process");
-PROCESS(data_transfer_process, "Data Transfer Process");
-AUTOSTART_PROCESSES(&sensing_process);
+static uint8_t ready_to_start_transfer = 0;
 
 static void init_sensors(void) {
   SENSORS_ACTIVATE(opt_3001_sensor);
@@ -63,9 +67,9 @@ static void init_sensors(void) {
 }
 
 static int16_t read_light_sensor(void) {
-  int value = opt_3001_sensor.value(0);
+  int value = opt_3001_sensor.value(0) / 100;
   if (value == CC26XX_SENSOR_READING_ERROR) return -1;
-  return (int16_t)(value / 100);
+  return (int16_t)value;
 }
 
 static int16_t read_motion_sensor(void) {
@@ -87,17 +91,20 @@ static int16_t read_motion_sensor(void) {
 void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *src, const linkaddr_t *dest) {
   if (len >= sizeof(uint8_t)) {
     uint8_t packet_type = *(uint8_t *)data;
-    if (packet_type == PACKET_TYPE_BEACON && len == sizeof(handshake_packet_t)) {
-      signed short rssi = packetbuf_attr(PACKETBUF_ATTR_RSSI);
-      if (rssi >= RSSI_THRESHOLD && !data_transfer_active && (buffer_full || write_index > 0)) {
-        printf("Node B detected. RSSI %d. Beginning handshake...
-", rssi);
+    signed short rssi = packetbuf_attr(PACKETBUF_ATTR_RSSI);
+
+    if (packet_type == PACKET_TYPE_BEACON && len == sizeof(beacon_packet_struct)) {
+      beacon_packet_struct *beacon = (beacon_packet_struct *)data;
+      printf("%lu DETECT %lu\n", clock_time() / CLOCK_SECOND, beacon->src_id);
+
+      if (rssi >= RSSI_THRESHOLD && reading_count > 0) {
         linkaddr_copy(&last_neighbor, src);
-        ok_to_send_received = 0;
-        data_transfer_active = 1;
+        ready_to_start_transfer = 1;
         process_start(&data_transfer_process, NULL);
       }
-    } else if (packet_type == PACKET_TYPE_OK_TO_RECEIVE) {
+    }
+    else if (packet_type == PACKET_TYPE_OK_TO_RECEIVE) {
+      printf("OK_TO_RECEIVE received from %u\n", src->u8[1]);
       ok_to_send_received = 1;
     }
   }
@@ -111,13 +118,14 @@ PROCESS_THREAD(sensing_process, ev, data) {
 
   while (1) {
     etimer_set(&sensing_timer, DATA_COLLECTION_RATE);
-    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&sensing_timer));
+    PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_TIMER);
     int16_t light = read_light_sensor();
     int16_t motion = read_motion_sensor();
-    light_readings[write_index] = light;
-    motion_readings[write_index] = motion;
-    write_index = (write_index + 1) % MAX_READINGS;
-    if (write_index == 0) buffer_full = 1;
+    if (reading_count < MAX_READINGS) {
+      light_readings[reading_count] = light;
+      motion_readings[reading_count] = motion;
+      reading_count++;
+    }
   }
   PROCESS_END();
 }
@@ -127,6 +135,9 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
 
   static handshake_packet_t handshake_packet;
   static data_packet_struct data_packet;
+  static unsigned int packet_size;
+  static unsigned int packet_count;
+  static unsigned int total_packets;
   static struct etimer timer;
   unsigned int retries = 0;
   ok_to_send_received = 0;
@@ -140,34 +151,37 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
     nullnet_buf = (uint8_t *)&handshake_packet;
     nullnet_len = sizeof(handshake_packet);
     NETSTACK_NETWORK.output(&last_neighbor);
+    printf("Sent READY_TO_SEND to Node B\n");
     etimer_set(&timer, HANDSHAKE_WAIT);
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&timer));
     retries++;
   }
 
   if (!ok_to_send_received) {
-    printf("Handshake failed.
-");
-    data_transfer_active = 0;
+    printf("Handshake failed. Aborting transfer.\n");
     PROCESS_EXIT();
   }
 
-  unsigned int count = buffer_full ? MAX_READINGS : write_index;
-  unsigned int start = buffer_full ? write_index : 0;
-  unsigned int packets = (count + READINGS_PER_PACKET - 1) / READINGS_PER_PACKET;
+  if (reading_count > last_sent_idx) {
+    total_packets = (reading_count - last_sent_idx + READINGS_PER_PACKET - 1) / READINGS_PER_PACKET;
+  }
+  if (total_packets == 0) {
+    printf("No data to send.\n");
+    PROCESS_EXIT();
+  }
 
-  for (unsigned int p = 0; p < packets; p++) {
+  for (packet_count = 0; packet_count < total_packets; packet_count++) {
+    unsigned int remaining = reading_count - last_sent_idx;
+    packet_size = (remaining < READINGS_PER_PACKET) ? remaining : READINGS_PER_PACKET;
+
     data_packet.packet_type = PACKET_TYPE_DATA;
     data_packet.src_id = node_id;
-    data_packet.start_idx = p * READINGS_PER_PACKET;
-    data_packet.num_readings = (count - p * READINGS_PER_PACKET < READINGS_PER_PACKET)
-                               ? count - p * READINGS_PER_PACKET
-                               : READINGS_PER_PACKET;
+    data_packet.start_idx = last_sent_idx;
+    data_packet.num_readings = packet_size;
 
-    for (unsigned int i = 0; i < data_packet.num_readings; i++) {
-      int idx = (start + p * READINGS_PER_PACKET + i) % MAX_READINGS;
-      data_packet.light_readings[i] = light_readings[idx];
-      data_packet.motion_readings[i] = motion_readings[idx];
+    for (unsigned int i = 0; i < packet_size; i++) {
+      data_packet.light_readings[i] = light_readings[last_sent_idx + i];
+      data_packet.motion_readings[i] = motion_readings[last_sent_idx + i];
     }
 
     nullnet_buf = (uint8_t *)&data_packet;
@@ -175,18 +189,14 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
     NETSTACK_NETWORK.output(&last_neighbor);
     etimer_set(&timer, CLOCK_SECOND / 5);
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&timer));
+    last_sent_idx += packet_size;
   }
 
   handshake_packet.packet_type = PACKET_TYPE_FINISH_SENDING;
   nullnet_buf = (uint8_t *)&handshake_packet;
   nullnet_len = sizeof(handshake_packet);
   NETSTACK_NETWORK.output(&last_neighbor);
-  printf("Finished sending data.
-");
-
-  write_index = 0;
-  buffer_full = 0;
-  data_transfer_active = 0;
+  printf("Sent FINISH_SENDING\n");
 
   PROCESS_END();
 }
