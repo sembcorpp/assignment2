@@ -117,7 +117,7 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
           }
         }
         
-        printf("Received data packet from %lu with %u readings starting at index %u (RSSI: %d)\n",
+        printf("Received data packet (RSSI: %d)\n",
                data_packet->src_id, data_packet->num_readings, data_packet->start_idx, rssi);
                
         // If we've received a complete set, send acknowledgment and display readings
