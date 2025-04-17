@@ -23,9 +23,16 @@
 // Packet types
 #define PACKET_TYPE_BEACON 1
 #define PACKET_TYPE_DATA 2
+#define PACKET_TYPE_ACK 3  // New packet type for acknowledgments
 
 // Maximum readings to send in one packet
 #define READINGS_PER_PACKET 10
+
+// Maximum transmission attempts
+#define MAX_RETRIES 3
+
+// Timeout for acknowledgment
+#define ACK_TIMEOUT (CLOCK_SECOND * 2)
 
 // Beacon packet structure
 typedef struct {
@@ -45,12 +52,24 @@ typedef struct {
   int16_t motion_readings[READINGS_PER_PACKET];
 } data_packet_struct;
 
+// Acknowledgment packet structure
+typedef struct {
+  uint8_t packet_type;
+  unsigned long src_id;
+  unsigned long received_count;  // Number of readings received so far
+} ack_packet_struct;
+
 // Variables for data collection
 static int16_t light_readings[MAX_READINGS];
 static int16_t motion_readings[MAX_READINGS];
 static unsigned int reading_count = 0;
 static unsigned int last_sent_idx = 0;
 static struct etimer sensing_timer;
+
+// Variables for data transfer
+static unsigned int last_ack_count = 0;
+static struct etimer ack_timer;
+static unsigned int retry_count = 0;
 
 // Variables for motion detection
 static int prev_ax = 0;
@@ -176,6 +195,19 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
         }
       }
     }
+    // Handle acknowledgment packets
+    else if (packet_type == PACKET_TYPE_ACK && len == sizeof(ack_packet_struct)) {
+      ack_packet_struct *ack_packet = (ack_packet_struct *)data;
+      
+      // Update last acknowledged count
+      last_ack_count = ack_packet->received_count;
+      
+      printf("Received ACK: %lu readings confirmed\n", last_ack_count);
+      
+      // Signal receipt of acknowledgment
+      etimer_stop(&ack_timer);
+      process_post(&data_transfer_process, PROCESS_EVENT_CONTINUE, NULL);
+    }
   }
 }
 
@@ -280,6 +312,16 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
   data_packet.packet_type = PACKET_TYPE_DATA;
   data_packet.src_id = node_id;
   
+  // Reset retry counter
+  retry_count = 0;
+  
+  // Use last_ack_count to determine where to start sending
+  if (last_ack_count > 0 && last_ack_count <= reading_count) {
+    // Resume from where the receiver left off
+    last_sent_idx = last_ack_count;
+    printf("Resuming transfer from index %u\n", last_sent_idx);
+  }
+  
   // Calculate number of packets needed
   total_packets = (reading_count - last_sent_idx + READINGS_PER_PACKET - 1) / READINGS_PER_PACKET;
   
@@ -287,6 +329,12 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
          reading_count - last_sent_idx, last_sent_idx, reading_count - 1);
   
   for (packet_count = 0; packet_count < total_packets; packet_count++) {
+    // If we've received an ACK with all readings, we're done
+    if (last_ack_count >= reading_count) {
+      printf("All readings confirmed received, transfer complete\n");
+      break;
+    }
+    
     // Calculate readings for this packet
     unsigned int remaining = reading_count - last_sent_idx;
     unsigned int packet_size = (remaining < READINGS_PER_PACKET) ? remaining : READINGS_PER_PACKET;
@@ -302,25 +350,65 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
       data_packet.motion_readings[i] = motion_readings[last_sent_idx + i];
     }
     
-    // Send packet
-    nullnet_buf = (uint8_t *)&data_packet;
-    nullnet_len = sizeof(data_packet);
+    // Reset retry count for this packet
+    retry_count = 0;
     
-    printf("Sending packet %u/%u with %lu readings starting at index %lu\n", 
-           packet_count + 1, total_packets, data_packet.num_readings, data_packet.start_idx);
+    // Send packet (with retries if needed)
+    while (retry_count < MAX_RETRIES) {
+      // Send packet
+      nullnet_buf = (uint8_t *)&data_packet;
+      nullnet_len = sizeof(data_packet);
+      
+      printf("Sending packet %u/%u with %lu readings starting at index %lu (try %u)\n", 
+             packet_count + 1, total_packets, data_packet.num_readings, 
+             data_packet.start_idx, retry_count + 1);
+      
+      NETSTACK_NETWORK.output(&last_neighbor);
+      
+      // Wait for acknowledgment
+      etimer_set(&ack_timer, ACK_TIMEOUT);
+      PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_CONTINUE || 
+                              (ev == PROCESS_EVENT_TIMER && etimer_expired(&ack_timer)));
+      
+      // If we got an ACK with a count that covers our sent data, proceed to next packet
+      if (last_ack_count > last_sent_idx) {
+        printf("Packet confirmed - last_ack_count: %u\n", last_ack_count);
+        break;
+      }
+      
+      // No ACK received or not all readings confirmed
+      retry_count++;
+      if (retry_count >= MAX_RETRIES) {
+        printf("Maximum retries reached for packet %u, continuing anyway\n", packet_count + 1);
+      } else {
+        printf("Retrying packet %u (attempt %u/%u)\n", 
+               packet_count + 1, retry_count + 1, MAX_RETRIES);
+      }
+    }
     
-    NETSTACK_NETWORK.output(&last_neighbor);
-    
-    // Update last sent index
-    last_sent_idx += packet_size;
+    // Update last sent index based on ACK
+    if (last_ack_count > last_sent_idx) {
+      // Update based on ACK (might have jumped ahead if NodeB received multiple packets)
+      last_sent_idx = last_ack_count;
+    } else {
+      // No ACK or no progress, still increment our sent index
+      last_sent_idx += packet_size;
+    }
     
     // Small delay between packets
     etimer_set(&packet_timer, CLOCK_SECOND / 5);
     PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_TIMER);
   }
   
-  printf("Data transfer complete, sent %u readings\n", 
-         reading_count - (reading_count - last_sent_idx));
+  // Final verification - check if all data was received
+  if (last_ack_count >= reading_count) {
+    printf("Data transfer complete, all %u readings confirmed received\n", reading_count);
+  } else {
+    printf("Data transfer ended, %u/%u readings confirmed received\n", 
+           last_ack_count, reading_count);
+  }
+  
+  // Transfer complete
   data_transfer_active = 0;
   
   PROCESS_END();
