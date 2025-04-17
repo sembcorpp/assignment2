@@ -119,24 +119,21 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
       printf("Received data packet from %lu with %u readings starting at index %u (RSSI: %d)\n",
              data_packet->src_id, data_packet->num_readings, data_packet->start_idx, rssi);
              
-      // Send acknowledgment packet
-      static ack_packet_struct ack_packet;
-      ack_packet.packet_type = PACKET_TYPE_ACK;
-      ack_packet.src_id = node_id;
-      ack_packet.received_count = received_readings_count;
-      
-      nullnet_buf = (uint8_t *)&ack_packet;
-      nullnet_len = sizeof(ack_packet);
-      NETSTACK_NETWORK.output(&data_sender_addr);
-      
-      printf("Sent ACK to %lu, received %u/60 readings\n", 
-             data_packet->src_id, received_readings_count);
-      
-      // Set timer to periodically send acknowledgments if no new data received
-      etimer_set(&ack_timer, CLOCK_SECOND);
-      
-      // If we've received a complete set, display them
+      // If we've received a complete set, send acknowledgment and display readings
       if (received_readings_count == MAX_READINGS) {
+        // Send final acknowledgment packet
+        static ack_packet_struct ack_packet;
+        ack_packet.packet_type = PACKET_TYPE_ACK;
+        ack_packet.src_id = node_id;
+        ack_packet.received_count = received_readings_count;
+        
+        nullnet_buf = (uint8_t *)&ack_packet;
+        nullnet_len = sizeof(ack_packet);
+        NETSTACK_NETWORK.output(&data_sender_addr);
+        
+        printf("Sent final ACK for all %u readings\n", received_readings_count);
+        
+        // Display readings
         printf("Light: ");
         for (i = 0; i < received_readings_count; i++) {
           printf("%d", received_light_readings[i]);
@@ -160,7 +157,6 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
         // Reset for next round
         received_readings_count = 0;
         data_reception_active = 0;
-        etimer_stop(&ack_timer);
       }
     }
   }
@@ -255,32 +251,15 @@ PROCESS_THREAD(nbr_discovery_process, ev, data) {
   while(1) {
     PROCESS_YIELD();
     
-    // If data reception is active and timer expires, send another ACK
-    if (ev == PROCESS_EVENT_TIMER && etimer_expired(&ack_timer) && data_reception_active) {
-      // If no packet received for 3 seconds, assume transfer is complete
-      if (clock_time() > last_packet_time + (3 * CLOCK_SECOND)) {
-        // If we received some data but not all 60 readings
-        if (received_readings_count > 0 && received_readings_count < MAX_READINGS) {
-          printf("Data transfer appears to be interrupted. Received %u/60 readings.\n", 
-                 received_readings_count);
-          
-          // Send final ACK to confirm what we received
-          static ack_packet_struct ack_packet;
-          ack_packet.packet_type = PACKET_TYPE_ACK;
-          ack_packet.src_id = node_id;
-          ack_packet.received_count = received_readings_count;
-          
-          nullnet_buf = (uint8_t *)&ack_packet;
-          nullnet_len = sizeof(ack_packet);
-          NETSTACK_NETWORK.output(&data_sender_addr);
-          
-          printf("Sent final ACK, received %u/60 readings\n", received_readings_count);
-        }
-        
-        // Reset state for next transfer
-        data_reception_active = 0;
-      } else {
-        // Periodically send ACK to confirm current progress
+    // If data reception is active but no packet received for 5 seconds
+    if (data_reception_active && 
+        clock_time() > last_packet_time + (5 * CLOCK_SECOND)) {
+      
+      printf("Data transfer timed out. Received %u/60 readings.\n", 
+             received_readings_count);
+             
+      // If we received some readings, send an ACK for what we got
+      if (received_readings_count > 0) {
         static ack_packet_struct ack_packet;
         ack_packet.packet_type = PACKET_TYPE_ACK;
         ack_packet.src_id = node_id;
@@ -290,11 +269,11 @@ PROCESS_THREAD(nbr_discovery_process, ev, data) {
         nullnet_len = sizeof(ack_packet);
         NETSTACK_NETWORK.output(&data_sender_addr);
         
-        printf("Sent periodic ACK, received %u/60 readings\n", received_readings_count);
-        
-        // Reset timer for next ACK
-        etimer_reset(&ack_timer);
+        printf("Sent timeout ACK for %u readings\n", received_readings_count);
       }
+      
+      // Reset state for next transfer
+      data_reception_active = 0;
     }
   }
 
