@@ -306,6 +306,11 @@ PROCESS_THREAD(data_transfer_process, ev, data) {
     nullnet_buf = (uint8_t *)&data_packet;
     nullnet_len = sizeof(data_packet);
     
+    printf("Sending data packet %u with %u readings (packet size: %u bytes)\n", 
+           last_sent_idx / READINGS_PER_PACKET, 
+           readings_to_send,
+           sizeof(data_packet));
+    
     // Send the packet
     int status = NETSTACK_NETWORK.output(&last_neighbor);
     if (status != 0) {
