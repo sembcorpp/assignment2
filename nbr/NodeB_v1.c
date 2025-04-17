@@ -90,6 +90,30 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
     curr_timestamp = clock_time();
     signed short rssi = packetbuf_attr(PACKETBUF_ATTR_RSSI);
     
+    // Handle beacon packet
+    if (packet_type == PACKET_TYPE_BEACON && len == sizeof(beacon_packet_struct)) {
+      beacon_packet_struct *beacon = (beacon_packet_struct *)data;
+      
+      // Log detection in required format
+      printf("%lu DETECT %lu\n", curr_timestamp / CLOCK_SECOND, beacon->src_id);
+      
+      // Store/update neighbor information
+      int idx = find_neighbor(beacon->src_id);
+      if (idx == -1 && num_neighbors < 10) {
+        // New neighbor
+        idx = num_neighbors++;
+        linkaddr_copy(&neighbors[idx].addr, src);
+        neighbors[idx].node_id = beacon->src_id;
+        neighbors[idx].discovered = 1;
+      }
+      
+      if (idx != -1) {
+        // Update neighbor information
+        neighbors[idx].rssi = rssi;
+        neighbors[idx].last_heard = curr_timestamp;
+      }
+    }
+    
     // Handle data packet
     if (packet_type == PACKET_TYPE_DATA && len == sizeof(data_packet_struct)) {
       data_packet_struct *data_packet = (data_packet_struct *)data;
