@@ -115,8 +115,11 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
     }
     
     // Handle data packet
-    if (packet_type == PACKET_TYPE_DATA && len == sizeof(data_packet_struct)) {
+    else if (packet_type == PACKET_TYPE_DATA && len == sizeof(data_packet_struct)) {
       data_packet_struct *data_packet = (data_packet_struct *)data;
+      
+      // Keep radio on while receiving data
+      NETSTACK_RADIO.on();
       
       // Store the sender information
       last_sender_id = data_packet->src_id;
@@ -139,8 +142,8 @@ void receive_packet_callback(const void *data, uint16_t len, const linkaddr_t *s
         }
       }
       
-      printf("Received data packet from %lu with %lu readings starting at index %lu\n",
-             data_packet->src_id, data_packet->num_readings, data_packet->start_idx);
+      printf("Received data packet from %lu with %lu readings starting at index %lu (RSSI: %d)\n",
+             data_packet->src_id, data_packet->num_readings, data_packet->start_idx, rssi);
       
       // If we've received a complete set, display them
       if (received_readings_count == MAX_READINGS) {
@@ -176,7 +179,7 @@ char sender_scheduler(struct rtimer *t, void *ptr) {
   PT_BEGIN(&pt);
 
   while(1) {
-    printf("Radio ON: sending beacons...\n");
+    printf("Radio ON: sending beacons and listening...\n");
     NETSTACK_RADIO.on();
 
     // Send NUM_SEND number of neighbour discovery beacon packets
@@ -197,6 +200,10 @@ char sender_scheduler(struct rtimer *t, void *ptr) {
         PT_YIELD(&pt);
       }
     }
+    
+    // Stay awake a bit longer after sending beacons to listen for responses
+    rtimer_set(t, RTIMER_TIME(t) + WAKE_TIME, 1, (rtimer_callback_t)sender_scheduler, ptr);
+    PT_YIELD(&pt);
 
     // sleep for a random number of slots
     if(SLEEP_CYCLE != 0){
@@ -236,6 +243,11 @@ PROCESS_THREAD(nbr_discovery_process, ev, data) {
   
   // Start sender in one millisecond
   rtimer_set(&rt, RTIMER_NOW() + (RTIMER_SECOND / 1000), 1, (rtimer_callback_t)sender_scheduler, NULL);
+
+  // Keep the process alive
+  while(1) {
+    PROCESS_YIELD();
+  }
 
   PROCESS_END();
 }
